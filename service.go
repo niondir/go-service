@@ -1,14 +1,13 @@
-// Package services defines interfaces and code to run background services in golang applications.
+// Package services defines interfaces and methods to run background services in golang applications.
 //
-// A Service is a somewhat independently running piece of code that has it's own go-routine
+// A Service is a somewhat independently running piece of code that runs in it's own go-routine
 // it's initialized at some point and stopped later. Think of it as a deamon within the application.
 //
-// All services are registered during init() or in main() and initialized all together by calling StartAll()
+// All services are registered during init() or in main() and initialized all together by calling Container.StartAll()
 // Services that implement the Initer interface, will run initial Init() code
-// All services have to implement the Runner interface. Run() is executed and blocks for the whole
-// lifetime of the service.
+// All services have to implement the Runner interface. Run() is blocking and only returns when the service stops working.
 //
-// TODO: We do not have support to notify the app about unexpected fatal errors yet
+// All services inside one container are started and stopped together. If one service fails, all are stopped.
 package services
 
 import (
@@ -120,11 +119,11 @@ func (f FuncService) Run(ctx context.Context) error {
 func newRunContext(s *serviceInfo) *runContext {
 	return &runContext{
 		service: s,
-		done:    make(chan error),
+		done:    make(chan error, 1),
 	}
 }
 
-func (c *Container) startOne(ctx context.Context, s *serviceInfo) error {
+func (c *Container) initOne(ctx context.Context, s *serviceInfo) error {
 	logger := logrus.WithField("service", s.name)
 	runner := newRunContext(s)
 	if _, ok := c.runContexts[s.name]; ok {
@@ -147,13 +146,35 @@ func (c *Container) startOne(ctx context.Context, s *serviceInfo) error {
 		}
 	}
 
+	return nil
+}
+
+func (c *Container) runOne(ctx context.Context, s *serviceInfo) error {
+	logger := logrus.WithField("service", s.name)
+
+	runner, ok := c.runContexts[s.name]
+	if !ok {
+		return fmt.Errorf("service '%s' not initialized", s.name)
+	}
+	if runner.running {
+		return fmt.Errorf("service '%s' already running", s.name)
+	}
+
 	// Execute the actual run method in background
 	runner.running = true
 	go func() {
 		logger.Info("Execute service.Run()")
-		runner.done <- s.service.Run(ctx)
-		logger.Info("Service stopped")
+		runErr := s.service.Run(ctx)
+		runner.done <- runErr
+		if runErr != nil {
+			// TODO: Make this optional / configurable?
+			logger.WithError(runErr).Error("Service stopped with error. Stop all services.")
+			c.StopAll()
+		} else {
+			logger.Error("Service stopped")
+		}
 	}()
+
 	return nil
 }
 
@@ -163,32 +184,46 @@ func (c *Container) StartAll(ctx context.Context) error {
 	}
 	c.runCtx, c.runCtxCancel = context.WithCancel(ctx)
 
-	// Iterate over all services to initialize and run them
+	// Iterate over all services to initialize them
 	for i := range c.services {
 		s := c.services[i]
 		logger := logrus.WithField("service", s.name)
 		// TODO: Should we allow services to optionally initialize in parallel?
-		logger.Infof("Starting service %d/%d", i+1, len(c.services))
+		logger.Infof("Initialize service %d/%d", i+1, len(c.services))
 
-		err := c.startOne(c.runCtx, s)
+		err := c.initOne(c.runCtx, s)
 		if err != nil {
-			logger.Errorf("Failed to start service.")
+			logger.Errorf("Failed to initialize service.")
 			c.runCtxCancel()
 			return err
 		}
 	}
-	logrus.Info("All services initialized")
+
+	// Iterate over all services to run them
+	for i := range c.services {
+		s := c.services[i]
+		logger := logrus.WithField("service", s.name)
+		logger.Infof("Run service %d/%d", i+1, len(c.services))
+
+		err := c.runOne(c.runCtx, s)
+		if err != nil {
+			logger.WithError(err).Errorf("Failed to start service.")
+			c.runCtxCancel()
+			return err
+		}
+	}
+
+	logrus.Info("All services running")
 	return nil
 }
 
 // StopAll gracefully stops all services.
 // If you need a timeout, passe a context with Timeout or Deadline
-func (c *Container) StopAll(ctx context.Context) {
+func (c *Container) StopAll() {
 	if c.runCtxCancel == nil {
 		panic("call Container.StartAll() before StopAll()")
 	}
 	c.runCtxCancel()
-	c.WaitAllStopped(ctx)
 }
 
 func (c *Container) runningServices() []*runContext {
@@ -202,11 +237,12 @@ func (c *Container) runningServices() []*runContext {
 	return rcs
 }
 
+// WaitAllStopped blocks until all services are stopped or context is exceeded
 func (c *Container) WaitAllStopped(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
 
 	wg := sync.WaitGroup{}
-	logrus.WithField("count", len(c.runContexts)).Infof("Stopping all services")
+	logrus.WithField("count", len(c.runContexts)).Infof("Wait till all services are stopped")
 	wg.Add(len(c.runContexts))
 	for k := range c.runContexts {
 		rc := c.runContexts[k]
@@ -245,6 +281,17 @@ func (c *Container) WaitAllStopped(ctx context.Context) {
 	if ctx.Err() == context.DeadlineExceeded {
 		c.runningServicesLogger().Warn("Services did not stopped gracefully!")
 	}
+}
+
+// ServiceErrors returns all errors occured in services
+func (c *Container) ServiceErrors() map[string]error {
+	errs := map[string]error{}
+	for _, rc := range c.runContexts {
+		if rc.err != nil {
+			errs[rc.service.name] = rc.err
+		}
+	}
+	return errs
 }
 
 func (c *Container) runningServicesLogger() *logrus.Entry {
