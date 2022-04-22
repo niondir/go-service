@@ -76,9 +76,11 @@ All services also stop if any `Run()` function returns with or without an error.
 You can actively wait for all services to stop:
 
 ```
-	c.WaitAllStopped(context.Background())
+	c.WaitAllStopped()
+	// or
+	c.WaitAllStoppedTimeout(time.Second)
 
-    // You can check for any errors that might have caused the services to stop
+	// You can check for any errors that might have caused the services to stop
 	errs := c.ServiceErrors()
 ```
 
