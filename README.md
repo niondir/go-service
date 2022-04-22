@@ -3,6 +3,13 @@
 A package to manage background services in go applications.
 
 
+# Overview
+
+`Services` are organized inside a `Container`. 
+All services must be registered first and are started via the container.
+
+
+
 # Usage
 
 
@@ -12,10 +19,10 @@ A service is as simple as implementing the `Runner` interface:
 
 ```
 type Runner interface {
-    // Run is executed inside it's own go-routine and must not return until the service stops.
-	// Run should only return after ctx.Done() or when a non recoverable error occurs.
-	// Returning an error means the service did fail. On ctx.Done() the service should shutdown gracefully.
-    Run(ctx context.Context) error
+	// Run is executed inside its own go-routine and must not return until the service stops.
+	// Run must return after <-ctx.Done() and shutdown gracefully
+	// When an error is returned, all services inside the container will be stopped
+	Run(ctx context.Context) error
 }
 ```
 
@@ -26,6 +33,9 @@ And register them inside a container:
 	c.Register(s1)
 ```
 
+Service names must be unique inside a single container.
+
+### Register with builder
 There is also a builder pattern if you prefer not to implement the interface yourself:
 
 ```
@@ -39,7 +49,15 @@ There is also a builder pattern if you prefer not to implement the interface you
 	}).Register(c)
 ```
 
-Service names must be unique inside a single container.
+### Register as function
+If you just want to register a single function as service you can use the following helper.
+
+```
+services.Default().Register(services.WithFunc(init, run))
+services.Default().Register(services.WithRunFunc(run))
+```
+
+Service names are derived from the function name via reflection.
 
 ## Start and Stop your services
 

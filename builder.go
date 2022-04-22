@@ -34,9 +34,9 @@ func (b *Builder) Run(f RunFunc) *Builder {
 }
 
 func (b *Builder) Register(container *Container) {
-	container.Register(&startRunner{b.name, b.init, b.run})
+	container.Register(&genericService{b.name, b.init, b.run})
 }
 
 func (b *Builder) RegisterDefault() {
-	Default().Register(&startRunner{b.name, b.init, b.run})
+	Default().Register(&genericService{b.name, b.init, b.run})
 }

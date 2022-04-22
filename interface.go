@@ -5,9 +5,9 @@ import "context"
 // Runner defines the interface to execute service related code in background
 
 type Runner interface {
-	// Run is executed inside it's own go-routine and must not return until the service stops.
-	// Run should only return after ctx.Done() or when a non recoverable error occurs.
-	// Returning an error means the service did fail. On ctx.Done() the service should shutdown gracefully.
+	// Run is executed inside its own go-routine and must not return until the service stops.
+	// Run must return after <-ctx.Done() and shutdown gracefully
+	// When an error is returned, all services inside the container will be stopped
 	Run(ctx context.Context) error
 }
 

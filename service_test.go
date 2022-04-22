@@ -23,11 +23,14 @@ type testService struct {
 	ErrorDuringRun error
 	// An error that will be returned when the service shut down
 	ErrorAfterRun error
-	initialized   bool
-	started       bool
-	running       bool
-	stopped       bool
-	err           error
+	// If set the service will not wait for <-ctx.Done()
+	SkipWaitForCtx bool
+	initialized    bool
+	started        bool
+	running        bool
+	stopped        bool
+	err            error
+	startedCh      chan struct{}
 }
 
 func (t testService) String() string {
@@ -41,6 +44,7 @@ func (t *testService) Init(ctx context.Context) error {
 	if t.ErrorDuringInit != nil {
 		return t.ErrorDuringInit
 	}
+	t.startedCh = make(chan struct{})
 	t.initialized = true
 	return nil
 }
@@ -54,6 +58,9 @@ func (t *testService) Run(ctx context.Context) error {
 		return fmt.Errorf("service %s was already started", t.Name)
 	}
 	t.started = true
+	if t.startedCh != nil {
+		close(t.startedCh)
+	}
 
 	if t.ErrorDuringRun != nil {
 		t.running = false
@@ -61,7 +68,9 @@ func (t *testService) Run(ctx context.Context) error {
 		return t.ErrorDuringRun
 	}
 
-	<-ctx.Done()
+	if !t.SkipWaitForCtx {
+		<-ctx.Done()
+	}
 	t.running = false
 
 	if t.stopped {
@@ -74,11 +83,11 @@ func (t *testService) Run(ctx context.Context) error {
 
 func assertServiceStartedAndStopped(t *testing.T, s *testService) {
 	t.Helper()
-	assert.True(t, s.initialized)
-	assert.True(t, s.started)
-	assert.True(t, s.stopped)
-	assert.False(t, s.running)
-	assert.NoError(t, s.err)
+	assert.True(t, s.initialized, "initialized")
+	assert.True(t, s.started, "started")
+	assert.True(t, s.stopped, "stopped")
+	assert.False(t, s.running, "running")
+	assert.NoError(t, s.err, "err")
 }
 
 func assertServiceStillRunning(t *testing.T, s *testService) {
@@ -120,7 +129,7 @@ func TestStartAndStopWithContext(t *testing.T) {
 	require.NoError(t, err)
 
 	cancelCtx()
-	c.WaitAllStopped(context.Background())
+	c.WaitAllStopped()
 	assert.Len(t, c.ServiceErrors(), 0)
 	assertServiceStartedAndStopped(t, s1)
 }
@@ -135,9 +144,7 @@ func TestStartAndStopWithContext_timeout(t *testing.T) {
 	err := c.StartAll(context.Background())
 	require.NoError(t, err)
 
-	stopCtx, cancelStopCtx := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancelStopCtx()
-	c.WaitAllStopped(stopCtx)
+	c.WaitAllStoppedTimeout(100 * time.Millisecond)
 	assert.Len(t, c.ServiceErrors(), 0)
 	assertServiceStillRunning(t, s1)
 }
@@ -159,9 +166,47 @@ func TestStartAndStop(t *testing.T) {
 	require.NoError(t, err)
 
 	c.StopAll()
-	c.WaitAllStopped(context.Background())
+	c.WaitAllStopped()
 	assert.Len(t, c.ServiceErrors(), 0)
 	assertServiceStartedAndStopped(t, s1)
+	assertServiceStartedAndStopped(t, s2)
+}
+
+// Start 3 services, the second will just return but the other two will keep running
+func TestServiceCanReturnWithoutError(t *testing.T) {
+	c := services.NewContainer()
+	s1 := &testService{
+		Name: "s1",
+	}
+	c.Register(s1)
+
+	s2 := &testService{
+		Name:           "s2",
+		SkipWaitForCtx: true,
+	}
+	c.Register(s2)
+
+	s3 := &testService{
+		Name: "s3",
+	}
+	c.Register(s3)
+
+	err := c.StartAll(context.Background())
+	require.NoError(t, err)
+
+	// Wait all started
+	<-s1.startedCh
+	<-s2.startedCh
+	<-s3.startedCh
+	assertServiceStillRunning(t, s1)
+	assertServiceStartedAndStopped(t, s2)
+	assertServiceStillRunning(t, s3)
+
+	c.StopAll()
+	c.WaitAllStopped()
+	assert.Len(t, c.ServiceErrors(), 0)
+	assertServiceStartedAndStopped(t, s1)
+	assertServiceStartedAndStopped(t, s2)
 	assertServiceStartedAndStopped(t, s2)
 }
 
@@ -190,7 +235,7 @@ func TestStopWhenInitFails(t *testing.T) {
 	require.Error(t, err)
 
 	// Expect all services to stop, since there was an error
-	c.WaitAllStopped(context.Background())
+	c.WaitAllStopped()
 	assert.Len(t, c.ServiceErrors(), 0)
 	assertServiceOnlyInitialized(t, s1)
 	assertServiceNeverStarted(t, s2)
@@ -222,7 +267,7 @@ func TestStopWhenRunFails(t *testing.T) {
 	require.NoError(t, err)
 
 	// Expect all services to stop, since there was an error
-	c.WaitAllStopped(context.Background())
+	c.WaitAllStopped()
 
 	require.Len(t, c.ServiceErrors(), 1)
 	errs := c.ServiceErrors()
@@ -260,7 +305,7 @@ func TestErrorOnShutdown(t *testing.T) {
 
 	// Stop all services, s2 will return an error
 	c.StopAll()
-	c.WaitAllStopped(context.Background())
+	c.WaitAllStopped()
 
 	require.Len(t, c.ServiceErrors(), 1)
 	errs := c.ServiceErrors()
@@ -270,37 +315,4 @@ func TestErrorOnShutdown(t *testing.T) {
 	assertServiceStartedAndStopped(t, s1)
 	assertServiceStartedAndStopped(t, s2)
 	assertServiceStartedAndStopped(t, s3)
-}
-
-func TestServiceBuilder(t *testing.T) {
-	c := services.NewContainer()
-
-	initialized := false
-	run := false
-	stopped := false
-
-	services.New("My Service").
-		Init(func(ctx context.Context) error {
-			initialized = true
-			return nil
-		}).
-		Run(func(ctx context.Context) error {
-			run = true
-			// Implement your service here. Try to keep it running, only return fatal errors.
-			<-ctx.Done()
-			// Gracefully shut down your service here
-			stopped = true
-			return nil
-		}).
-		Register(c)
-
-	err := c.StartAll(context.Background())
-	require.NoError(t, err)
-	c.StopAll()
-	c.WaitAllStopped(context.Background())
-
-	assert.Len(t, c.ServiceErrors(), 0)
-	assert.True(t, initialized)
-	assert.True(t, run)
-	assert.True(t, stopped)
 }
