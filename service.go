@@ -52,12 +52,11 @@ type serviceInfo struct {
 	service Runner
 }
 
-func (rc *runContext) Wait() {
+func (rc *runContext) wait() {
 	if !rc.running {
 		return
 	}
-	rc.err = <-rc.done
-	rc.running = false
+	<-rc.done
 }
 
 // Container with all services
@@ -156,7 +155,9 @@ func (c *Container) runOne(ctx context.Context, s *serviceInfo) error {
 	runner.running = true
 	go func() {
 		runErr := s.service.Run(ctx)
-		runner.done <- runErr
+		runner.err = runErr
+		runner.running = false
+		close(runner.done)
 		if runErr != nil {
 			c.onStopAll()
 			c.StopAll()
@@ -219,7 +220,13 @@ func (c *Container) runningServices() []*runContext {
 }
 
 func (c *Container) RunningCount() int {
-	return len(c.runContexts)
+	cnt := 0
+	for _, rc := range c.runContexts {
+		if rc.running {
+			cnt++
+		}
+	}
+	return cnt
 }
 
 func (c *Container) ServiceNames() []string {
@@ -253,19 +260,18 @@ func (c *Container) WaitAllStoppedTimeout(timeout time.Duration) {
 	} else {
 		ctx, cancel = context.WithCancel(context.Background())
 	}
-
 	wg := sync.WaitGroup{}
 	wg.Add(len(c.runContexts))
 	for k := range c.runContexts {
 		rc := c.runContexts[k]
 		go func() {
-			rc.Wait()
+			rc.wait()
 			c.onStopped(rc)
 			wg.Done()
 		}()
 	}
 
-	// Wait till all services are stopped
+	// wait till all services are stopped
 	go func() {
 		wg.Wait()
 		cancel()
@@ -274,7 +280,7 @@ func (c *Container) WaitAllStoppedTimeout(timeout time.Duration) {
 	<-ctx.Done()
 }
 
-// ServiceErrors returns all errors occured in services
+// ServiceErrors returns all errors occurred in services
 func (c *Container) ServiceErrors() map[string]error {
 	errs := map[string]error{}
 	for _, rc := range c.runContexts {

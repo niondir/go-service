@@ -19,5 +19,5 @@ type Initer interface {
 }
 
 type Waiter interface {
-	Wait()
+	wait()
 }

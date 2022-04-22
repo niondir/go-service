@@ -194,13 +194,16 @@ func TestServiceCanReturnWithoutError(t *testing.T) {
 	err := c.StartAll(context.Background())
 	require.NoError(t, err)
 
-	// Wait all started
+	// wait all started
 	<-s1.startedCh
 	<-s2.startedCh
 	<-s3.startedCh
 	assertServiceStillRunning(t, s1)
 	assertServiceStartedAndStopped(t, s2)
 	assertServiceStillRunning(t, s3)
+
+	assert.Len(t, c.ServiceNames(), 3)
+	assert.Equal(t, 2, c.RunningCount())
 
 	c.StopAll()
 	c.WaitAllStopped()
