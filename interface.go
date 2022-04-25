@@ -13,7 +13,7 @@ type Runner interface {
 
 // Initer can be optionally implemented for services that need to run initial startup code
 // All init methods of registered services are executed sequentially
-// When a starter returns an error, no further services are executed and the application shuts down
+// When Init() returns an error, no further services are executed and the application shuts down
 type Initer interface {
 	Init(ctx context.Context) error
 }
