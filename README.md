@@ -71,13 +71,13 @@ After registering all services you can start them all together.
 ```
 
 Stop all services, by either calling `c.StopAll()` or `runCtxCancel()`.
-All services also stop if any `Run()` function returns with or without an error.
+All services also stop if any `Run()` function returns an error.
 
 You can actively wait for all services to stop:
 
 ```
 	c.WaitAllStopped()
-	// or
+	// or with timeout
 	c.WaitAllStoppedTimeout(time.Second)
 
 	// You can check for any errors that might have caused the services to stop
@@ -99,7 +99,7 @@ in oder of service registration.
 ```
 // Initer can be optionally implemented for services that need to run initial startup code
 // All init methods of registered services are executed sequentially
-// When a starter returns an error, no further services are executed and the application shuts down
+// When Init() returns an error, no further services are executed and the application shuts down
 type Initer interface {
 	Init(ctx context.Context) error
 }
