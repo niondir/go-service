@@ -43,7 +43,7 @@ func (s MyService) Run(ctx context.Context) error {
 	go func() {
 		<-ctx.Done()
 		// Optional shutdown logic, e.g. http.Shutdown(shutdownCtx)
-	}
+	}()
 	
 	// Usually blocking code like http.ListenAndServe(), else you can also wait for <-ctx.Done()
 	
