@@ -26,6 +26,31 @@ type Runner interface {
 }
 ```
 
+Service struct boilerplate. Initer is optional (see below).
+```
+var _ services.Runner = &MyService{}
+var _ services.Initer = &MyService{}
+
+type HttpService struct {
+	// Whatever is needed in context of the service
+}
+
+func (h HttpService) Init(ctx context.Context) error {
+	return nil
+}
+
+func (h HttpService) Run(ctx context.Context) error {
+	go func() {
+		<-ctx.Done()
+		// Optional shutdown logic, e.g. http.Shutdown(shutdownCtx)
+	}
+	
+	// Usually blocking code like http.ListenAndServe(), else you can also wait for <-ctx.Done()
+	
+	return nil
+}
+```
+
 And register them inside a container:
 
 ```
