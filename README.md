@@ -31,15 +31,15 @@ Service struct boilerplate. Initer is optional (see below).
 var _ services.Runner = &MyService{}
 var _ services.Initer = &MyService{}
 
-type HttpService struct {
+type MyService struct {
 	// Whatever is needed in context of the service
 }
 
-func (h HttpService) Init(ctx context.Context) error {
+func (s MyService) Init(ctx context.Context) error {
 	return nil
 }
 
-func (h HttpService) Run(ctx context.Context) error {
+func (s MyService) Run(ctx context.Context) error {
 	go func() {
 		<-ctx.Done()
 		// Optional shutdown logic, e.g. http.Shutdown(shutdownCtx)
