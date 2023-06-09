@@ -46,6 +46,8 @@ func (s *MyService) Run(ctx context.Context) error {
 	}()
 	
 	// Usually blocking code like http.ListenAndServe(), else you can also wait for <-ctx.Done()
+	// After gracefull shutdown return nil
+	// If an error is returned all services inside the same container will also be stopped
 	
 	return nil
 }
