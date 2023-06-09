@@ -1,21 +1,21 @@
-package services_test
+package service_test
 
 import (
 	"context"
-	"github.com/niondir/go-services"
+	"github.com/niondir/go-service"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"testing"
 )
 
 func TestServiceBuilder(t *testing.T) {
-	c := services.NewContainer()
+	c := service.NewContainer()
 
 	initialized := false
 	run := false
 	stopped := false
 
-	services.New("My Service").
+	service.New("My Service").
 		Init(func(ctx context.Context) error {
 			initialized = true
 			return nil

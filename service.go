@@ -8,7 +8,7 @@
 // All services have to implement the Runner interface. Run() is blocking and only returns when the service stops working.
 //
 // All services inside one container are started and stopped together. If one service fails, all are stopped.
-package services
+package service
 
 import (
 	"context"

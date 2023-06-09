@@ -1,17 +1,17 @@
-package services_test
+package service_test
 
 import (
 	"context"
 	"fmt"
-	"github.com/niondir/go-services"
+	"github.com/niondir/go-service"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"testing"
 	"time"
 )
 
-var _ services.Initer = &testService{}
-var _ services.Runner = &testService{}
+var _ service.Initer = &testService{}
+var _ service.Runner = &testService{}
 var _ fmt.Stringer = testService{}
 
 // testService is a service that tracks it's state to be checked in tests
@@ -118,7 +118,7 @@ func assertServiceNeverStarted(t *testing.T, s *testService) {
 }
 
 func TestStartAndStopWithContext(t *testing.T) {
-	c := services.NewContainer()
+	c := service.NewContainer()
 	s1 := &testService{
 		Name: "s1",
 	}
@@ -135,7 +135,7 @@ func TestStartAndStopWithContext(t *testing.T) {
 }
 
 func TestStartAndStopWithContext_timeout(t *testing.T) {
-	c := services.NewContainer()
+	c := service.NewContainer()
 	s1 := &testService{
 		Name: "s1",
 	}
@@ -151,7 +151,7 @@ func TestStartAndStopWithContext_timeout(t *testing.T) {
 
 // Start and Stop multiple services (happy path)
 func TestStartAndStop(t *testing.T) {
-	c := services.NewContainer()
+	c := service.NewContainer()
 	s1 := &testService{
 		Name: "s1",
 	}
@@ -174,7 +174,7 @@ func TestStartAndStop(t *testing.T) {
 
 // Start 3 services, the second will just return but the other two will keep running
 func TestServiceCanReturnWithoutError(t *testing.T) {
-	c := services.NewContainer()
+	c := service.NewContainer()
 	s1 := &testService{
 		Name: "s1",
 	}
@@ -215,7 +215,7 @@ func TestServiceCanReturnWithoutError(t *testing.T) {
 
 // Start 3 services, the second fails during init, none should run
 func TestStopWhenInitFails(t *testing.T) {
-	c := services.NewContainer()
+	c := service.NewContainer()
 	s1 := &testService{
 		Name: "s1",
 	}
@@ -247,7 +247,7 @@ func TestStopWhenInitFails(t *testing.T) {
 
 // Start 3 services, the second fails during run
 func TestStopWhenRunFails(t *testing.T) {
-	c := services.NewContainer()
+	c := service.NewContainer()
 	s1 := &testService{
 		Name: "s1",
 	}
@@ -284,7 +284,7 @@ func TestStopWhenRunFails(t *testing.T) {
 
 // Start 3 services, the second fails after run
 func TestErrorOnShutdown(t *testing.T) {
-	c := services.NewContainer()
+	c := service.NewContainer()
 	s1 := &testService{
 		Name: "s1",
 	}

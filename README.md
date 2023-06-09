@@ -1,4 +1,4 @@
-# go Services
+# go Service
 
 A package to manage background services in go applications.
 
@@ -28,8 +28,8 @@ type Runner interface {
 
 Service struct boilerplate. Initer is optional (see below).
 ```
-var _ services.Runner = &MyService{}
-var _ services.Initer = &MyService{}
+var _ service.Runner = &MyService{}
+var _ service.Initer = &MyService{}
 
 type MyService struct {
 	// Whatever is needed in context of the service
@@ -54,7 +54,7 @@ func (s *MyService) Run(ctx context.Context) error {
 And register them inside a container:
 
 ```
-	c := services.NewContainer() // or use services.Default()
+	c := service.NewContainer() // or use service.Default()
 	c.Register(s1)
 ```
 
@@ -64,9 +64,9 @@ Service names must be unique inside a single container.
 There is also a builder pattern if you prefer not to implement the interface yourself:
 
 ```
-	c := services.NewContainer()
+	c := service.NewContainer()
 	
-	services.New("My Service").Run(func(ctx context.Context) error {
+	service.New("My Service").Run(func(ctx context.Context) error {
 		// Implement your service here. Try to keep it running, only return fatal errors.
 		<-ctx.Done()
 		// Gracefully shut down your service here
@@ -78,8 +78,8 @@ There is also a builder pattern if you prefer not to implement the interface you
 If you just want to register a single function as service you can use the following helper.
 
 ```
-services.Default().Register(services.WithFunc(init, run))
-services.Default().Register(services.WithRunFunc(run))
+service.Default().Register(service.WithFunc(init, run))
+service.Default().Register(service.WithRunFunc(run))
 ```
 
 Service names are derived from the function name via reflection.
@@ -118,7 +118,7 @@ To change this name you can implement the `fmt.Stringer` interface.
 ## Service initialization
 
 Before any `Run()` method gets called, 
-optional `Init()` methods from the `services.Initer` interface are executed sequentially
+optional `Init()` methods from the `service.Initer` interface are executed sequentially
 in oder of service registration.
 
 ```
@@ -133,7 +133,7 @@ type Initer interface {
 Or use the builder:
 
 ```
-	services.New("My Service").
+	service.New("My Service").
 		Init(func(ctx context.Context) error {
 			return nil
 		}).

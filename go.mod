@@ -1,4 +1,4 @@
-module github.com/niondir/go-services
+module github.com/niondir/go-service
 
 go 1.18
 

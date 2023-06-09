@@ -1,15 +1,15 @@
-package services_test
+package service_test
 
 import (
 	"context"
-	"github.com/niondir/go-services"
+	"github.com/niondir/go-service"
 	"github.com/stretchr/testify/require"
 	"testing"
 	"time"
 )
 
 func TestWithRunFunc(t *testing.T) {
-	c := services.NewContainer()
+	c := service.NewContainer()
 	started := false
 	stopped := false
 
@@ -22,7 +22,7 @@ func TestWithRunFunc(t *testing.T) {
 		return nil
 	}
 
-	c.Register(services.WithRunFunc(anon))
+	c.Register(service.WithRunFunc(anon))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	err := c.StartAll(ctx)
@@ -40,7 +40,7 @@ func TestWithFunc(t *testing.T) {
 	started := false
 	stopped := false
 
-	c := services.NewContainer()
+	c := service.NewContainer()
 	init := func(ctx context.Context) error {
 		initialized = true
 		t.Logf("service initialized")
@@ -55,7 +55,7 @@ func TestWithFunc(t *testing.T) {
 		return nil
 	}
 
-	c.Register(services.WithFunc(init, run))
+	c.Register(service.WithFunc(init, run))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	err := c.StartAll(ctx)
