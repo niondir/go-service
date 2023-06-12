@@ -13,6 +13,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"golang.org/x/exp/slog"
 	"sync"
 	"time"
 )
@@ -72,12 +73,15 @@ type Container struct {
 	runCtxCancel context.CancelFunc
 	services     []*serviceInfo
 	runContexts  map[string]*runContext
+	log          *slog.Logger
 }
 
 func NewContainer() *Container {
+	nopLogger := slog.New(NopHandler{})
 	return &Container{
 		services:    make([]*serviceInfo, 0),
 		runContexts: map[string]*runContext{},
+		log:         nopLogger,
 	}
 }
 
@@ -88,6 +92,10 @@ func Default() *Container {
 		defaultContainer = NewContainer()
 	}
 	return defaultContainer
+}
+
+func (c *Container) SetLogger(logger *slog.Logger) {
+	c.log = logger
 }
 
 // Register adds a service to the list of services to be initialized
@@ -107,6 +115,7 @@ func (c *Container) Register(service Runner) {
 		name:    name,
 		service: service,
 	})
+	c.log.Info("Registered service", "name", name)
 }
 
 func newRunContext(s *serviceInfo) *runContext {
@@ -127,6 +136,7 @@ func (c *Container) initOne(ctx context.Context, s *serviceInfo) error {
 
 	// Execute initialization code if any
 	if initer, ok := s.service.(Initer); ok {
+		c.log.Info("Initializing service", "name", s.name)
 		err := initer.Init(ctx)
 		if err != nil {
 			go func() {
@@ -134,8 +144,10 @@ func (c *Container) initOne(ctx context.Context, s *serviceInfo) error {
 				// The error is nil, since it is the "Run()" error
 				runner.done <- nil
 			}()
+			c.log.Debug("Failed to initialize service", "name", s.name, "error", err)
 			return fmt.Errorf("failed to init service %s: %w", s.name, err)
 		}
+		c.log.Info("Initialized service", "name", s.name)
 	}
 
 	return nil
@@ -154,7 +166,9 @@ func (c *Container) runOne(ctx context.Context, s *serviceInfo) error {
 	// Execute the actual run method in background
 	runner.running = true
 	go func() {
+		c.log.Info("Starting service", "name", s.name)
 		runErr := s.service.Run(ctx)
+		c.log.Info("Service stopped", "name", s.name, "error", runErr)
 		runner.err = runErr
 		runner.running = false
 		close(runner.done)
