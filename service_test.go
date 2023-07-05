@@ -340,5 +340,48 @@ func TestStartAndFailWithError(t *testing.T) {
 		assert.Len(t, c.ServiceErrors(), 1)
 		//t.Fatal("timeout, expected context to be canceled")
 	}
+}
 
+// When the context starts to shutdown because of any service error the application want's to get notified
+func TestNotifyOnShutdown(t *testing.T) {
+	c := service.NewContainer()
+	c.SetLogger(slog.Default())
+	s1 := &testService{
+		Name:           "s1",
+		ErrorDuringRun: fmt.Errorf("something failed"),
+	}
+	c.Register(s1)
+	s2 := &testService{
+		Name:           "s2",
+		ErrorDuringRun: fmt.Errorf("something failed"),
+	}
+	c.Register(s2)
+
+	s3 := &testService{
+		Name: "s3-no-error",
+	}
+	c.Register(s3)
+
+	ctx, cancelCtx := context.WithCancel(context.Background())
+	err := c.StartAll(ctx)
+	require.NoError(t, err)
+
+	shutdownCalls := 0
+	c.OnShutdown(func() {
+		shutdownCalls++
+		cancelCtx()
+	})
+
+	ctxIsDone := false
+	select {
+	case <-ctx.Done():
+		ctxIsDone = true
+	case <-time.After(1 * time.Second):
+		t.Fatal("timeout, expected context to be canceled")
+	}
+
+	c.WaitAllStoppedTimeout(100 * time.Millisecond)
+	assert.Equal(t, 1, shutdownCalls)
+	assert.True(t, ctxIsDone)
+	assert.Len(t, c.ServiceErrors(), 2)
 }

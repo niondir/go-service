@@ -70,10 +70,12 @@ type Container struct {
 	// Context in which all services are running
 	runCtx context.Context
 	// Cancel method of the runCtx, when called all services should stop
-	runCtxCancel context.CancelFunc
-	services     []*serviceInfo
-	runContexts  map[string]*runContext
-	log          *slog.Logger
+	runCtxCancel      context.CancelFunc
+	services          []*serviceInfo
+	runContexts       map[string]*runContext
+	log               *slog.Logger
+	callOnStopAllOnce sync.Once
+	shutdownCallbacks []func()
 }
 
 func NewContainer() *Container {
@@ -178,7 +180,6 @@ func (c *Container) runOne(ctx context.Context, s *serviceInfo) error {
 		runner.running = false
 		close(runner.done)
 		if runErr != nil {
-			c.onStopAll()
 			c.StopAll()
 		}
 	}()
@@ -221,6 +222,9 @@ func (c *Container) StartAll(ctx context.Context) error {
 // StopAll gracefully stops all services.
 // If you need a timeout, passe a context with Timeout or Deadline
 func (c *Container) StopAll() {
+	c.callOnStopAllOnce.Do(func() {
+		c.onStopAll()
+	})
 	if c.runCtxCancel == nil {
 		panic("call Container.StartAll() before StopAll()")
 	}
@@ -311,8 +315,11 @@ func (c *Container) ServiceErrors() map[string]error {
 }
 
 // onStopAll is called when all services get stopped
+// This method is only called once per container
 func (c *Container) onStopAll() {
-
+	for _, f := range c.shutdownCallbacks {
+		f()
+	}
 }
 
 // onInit is called before a service Init method is called
@@ -328,4 +335,10 @@ func (c *Container) onRun(s *serviceInfo) {
 // onStopped is called after a service was stopped
 func (c *Container) onStopped(rc *runContext) {
 
+}
+
+// OnShutdown is called when the container is stopped and all services are going to be stopped
+// The callback is only called once per container
+func (c *Container) OnShutdown(f func()) {
+	c.shutdownCallbacks = append(c.shutdownCallbacks, f)
 }
