@@ -6,6 +6,7 @@ import (
 	"github.com/niondir/go-service"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/exp/slog"
 	"testing"
 	"time"
 )
@@ -318,4 +319,26 @@ func TestErrorOnShutdown(t *testing.T) {
 	assertServiceStartedAndStopped(t, s1)
 	assertServiceStartedAndStopped(t, s2)
 	assertServiceStartedAndStopped(t, s3)
+}
+
+func TestStartAndFailWithError(t *testing.T) {
+	c := service.NewContainer()
+	c.SetLogger(slog.Default())
+	s1 := &testService{
+		Name:           "s1",
+		ErrorDuringRun: fmt.Errorf("something failed"),
+	}
+	c.Register(s1)
+
+	ctx := context.Background()
+	err := c.StartAll(ctx)
+	require.NoError(t, err)
+	select {
+	case <-ctx.Done():
+		t.Fatal("parent context canceled, note that this does no happen!")
+	case <-time.After(1 * time.Second):
+		assert.Len(t, c.ServiceErrors(), 1)
+		//t.Fatal("timeout, expected context to be canceled")
+	}
+
 }

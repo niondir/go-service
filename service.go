@@ -166,9 +166,14 @@ func (c *Container) runOne(ctx context.Context, s *serviceInfo) error {
 	// Execute the actual run method in background
 	runner.running = true
 	go func() {
-		c.log.Info("Starting service", "name", s.name)
+		logger := c.log.With("name", s.name)
+		logger.Info("Starting service")
 		runErr := s.service.Run(ctx)
-		c.log.Info("Service stopped", "name", s.name, "error", runErr)
+		if runErr != nil {
+			logger.Error("Service stopped with error", "error", runErr)
+		} else {
+			logger.Info("Service stopped")
+		}
 		runner.err = runErr
 		runner.running = false
 		close(runner.done)
