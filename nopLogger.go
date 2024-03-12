@@ -2,7 +2,7 @@ package service
 
 import (
 	"context"
-	"golang.org/x/exp/slog"
+	"log/slog"
 )
 
 var _ slog.Handler = NopHandler{}

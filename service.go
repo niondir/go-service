@@ -13,7 +13,7 @@ package service
 import (
 	"context"
 	"fmt"
-	"golang.org/x/exp/slog"
+	"log/slog"
 	"sync"
 	"time"
 )
