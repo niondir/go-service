@@ -13,9 +13,7 @@ type Builder struct {
 func New(name string) *Builder {
 	b := &Builder{
 		name: name,
-		init: func(ctx context.Context) error {
-			return nil
-		},
+		// init stays nil unless set via Init(), so no init logs are written for services without init code
 		run: func(ctx context.Context) error {
 			return nil
 		},
@@ -34,9 +32,9 @@ func (b *Builder) Run(f RunFunc) *Builder {
 }
 
 func (b *Builder) Register(container *Container) {
-	container.Register(&genericService{b.name, b.init, b.run})
+	container.Register(newGenericService(b.name, b.init, b.run))
 }
 
 func (b *Builder) RegisterDefault() {
-	Default().Register(&genericService{b.name, b.init, b.run})
+	Default().Register(newGenericService(b.name, b.init, b.run))
 }

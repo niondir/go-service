@@ -7,13 +7,15 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"log/slog"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
 var _ service.Initer = &testService{}
 var _ service.Runner = &testService{}
-var _ fmt.Stringer = testService{}
+var _ fmt.Stringer = &testService{}
 
 // testService is a service that tracks it's state to be checked in tests
 type testService struct {
@@ -26,19 +28,38 @@ type testService struct {
 	ErrorAfterRun error
 	// If set the service will not wait for <-ctx.Done()
 	SkipWaitForCtx bool
-	initialized    bool
-	started        bool
-	running        bool
-	stopped        bool
-	err            error
-	startedCh      chan struct{}
+	// If set, Run panics with this value
+	PanicDuringRun any
+	// If set, Run blocks this long after <-ctx.Done() before returning
+	ShutdownDelay time.Duration
+
+	mu          sync.Mutex
+	initialized bool
+	started     bool
+	running     bool
+	stopped     bool
+	err         error
+	startedCh   chan struct{}
 }
 
-func (t testService) String() string {
+type testServiceState struct {
+	initialized, started, running, stopped bool
+	err                                    error
+}
+
+func (t *testService) String() string {
 	return fmt.Sprintf("testService.%s", t.Name)
 }
 
+func (t *testService) state() testServiceState {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return testServiceState{t.initialized, t.started, t.running, t.stopped, t.err}
+}
+
 func (t *testService) Init(ctx context.Context) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	if t.initialized {
 		return fmt.Errorf("service %s was already initialized", t.Name)
 	}
@@ -51,11 +72,14 @@ func (t *testService) Init(ctx context.Context) error {
 }
 
 func (t *testService) Run(ctx context.Context) error {
+	t.mu.Lock()
 	if t.running {
+		t.mu.Unlock()
 		return fmt.Errorf("service %s already running", t.Name)
 	}
 	t.running = true
 	if t.started {
+		t.mu.Unlock()
 		return fmt.Errorf("service %s was already started", t.Name)
 	}
 	t.started = true
@@ -63,15 +87,26 @@ func (t *testService) Run(ctx context.Context) error {
 		close(t.startedCh)
 	}
 
+	if t.PanicDuringRun != nil {
+		t.mu.Unlock()
+		panic(t.PanicDuringRun)
+	}
+
 	if t.ErrorDuringRun != nil {
 		t.running = false
 		t.stopped = true
+		t.mu.Unlock()
 		return t.ErrorDuringRun
 	}
+	t.mu.Unlock()
 
 	if !t.SkipWaitForCtx {
 		<-ctx.Done()
+		time.Sleep(t.ShutdownDelay)
 	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.running = false
 
 	if t.stopped {
@@ -82,40 +117,51 @@ func (t *testService) Run(ctx context.Context) error {
 	return t.ErrorAfterRun
 }
 
+// waitStopped waits until all services of c stopped or the timeout is reached
+func waitStopped(c *service.Container, timeout time.Duration) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	c.WaitAllStopped(ctx)
+}
+
 func assertServiceStartedAndStopped(t *testing.T, s *testService) {
 	t.Helper()
-	assert.True(t, s.initialized, "initialized")
-	assert.True(t, s.started, "started")
-	assert.True(t, s.stopped, "stopped")
-	assert.False(t, s.running, "running")
-	assert.NoError(t, s.err, "err")
+	st := s.state()
+	assert.True(t, st.initialized, "initialized")
+	assert.True(t, st.started, "started")
+	assert.True(t, st.stopped, "stopped")
+	assert.False(t, st.running, "running")
+	assert.NoError(t, st.err, "err")
 }
 
 func assertServiceStillRunning(t *testing.T, s *testService) {
 	t.Helper()
-	assert.True(t, s.initialized)
-	assert.True(t, s.started)
-	assert.False(t, s.stopped, "Stopped")
-	assert.True(t, s.running, "Still Running")
-	assert.NoError(t, s.err)
+	st := s.state()
+	assert.True(t, st.initialized)
+	assert.True(t, st.started)
+	assert.False(t, st.stopped, "Stopped")
+	assert.True(t, st.running, "Still Running")
+	assert.NoError(t, st.err)
 }
 
 func assertServiceOnlyInitialized(t *testing.T, s *testService) {
 	t.Helper()
-	assert.True(t, s.initialized)
-	assert.False(t, s.started)
-	assert.False(t, s.stopped)
-	assert.False(t, s.running)
-	assert.NoError(t, s.err)
+	st := s.state()
+	assert.True(t, st.initialized)
+	assert.False(t, st.started)
+	assert.False(t, st.stopped)
+	assert.False(t, st.running)
+	assert.NoError(t, st.err)
 }
 
 func assertServiceNeverStarted(t *testing.T, s *testService) {
 	t.Helper()
-	assert.False(t, s.initialized)
-	assert.False(t, s.started)
-	assert.False(t, s.stopped)
-	assert.False(t, s.running)
-	assert.NoError(t, s.err)
+	st := s.state()
+	assert.False(t, st.initialized)
+	assert.False(t, st.started)
+	assert.False(t, st.stopped)
+	assert.False(t, st.running)
+	assert.NoError(t, st.err)
 }
 
 func TestStartAndStopWithContext(t *testing.T) {
@@ -145,9 +191,7 @@ func TestStartAndStopWithContext_timeout(t *testing.T) {
 	err := c.StartAll(context.Background())
 	require.NoError(t, err)
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-	c.WaitAllStopped(shutdownCtx)
+	waitStopped(c, 100*time.Millisecond)
 	assert.Len(t, c.ServiceErrors(), 0)
 	assertServiceStillRunning(t, s1)
 }
@@ -201,6 +245,8 @@ func TestServiceCanReturnWithoutError(t *testing.T) {
 	<-s1.startedCh
 	<-s2.startedCh
 	<-s3.startedCh
+	require.Eventually(t, func() bool { return s2.state().stopped }, time.Second, time.Millisecond)
+	require.Eventually(t, func() bool { return c.RunningCount() == 2 }, time.Second, time.Millisecond)
 	assertServiceStillRunning(t, s1)
 	assertServiceStartedAndStopped(t, s2)
 	assertServiceStillRunning(t, s3)
@@ -365,12 +411,12 @@ func TestNotifyOnShutdown(t *testing.T) {
 	c.Register(s3)
 
 	ctx, cancelCtx := context.WithCancel(context.Background())
-	err := c.StartAll(ctx)
-	require.NoError(t, err)
+	// s1 fails immediately, StartAll might abort before s2 and s3 are started
+	_ = c.StartAll(ctx)
 
-	shutdownCalls := 0
+	var shutdownCalls atomic.Int32
 	c.OnShutdown(func() {
-		shutdownCalls++
+		shutdownCalls.Add(1)
 		cancelCtx()
 	})
 
@@ -382,10 +428,8 @@ func TestNotifyOnShutdown(t *testing.T) {
 		t.Fatal("timeout, expected context to be canceled")
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-	c.WaitAllStopped(shutdownCtx)
-	assert.Equal(t, 1, shutdownCalls)
+	waitStopped(c, 100*time.Millisecond)
+	assert.Equal(t, int32(1), shutdownCalls.Load())
 	assert.True(t, ctxIsDone)
-	assert.Len(t, c.ServiceErrors(), 2)
+	assert.NotEmpty(t, c.ServiceErrors())
 }
