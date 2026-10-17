@@ -25,9 +25,9 @@ func getFunctionName(i interface{}) string {
 }
 
 func WithRunFunc(runFn RunFunc) Runner {
-	return &genericService{getFunctionName(runFn), nil, runFn}
+	return newGenericService(getFunctionName(runFn), nil, runFn)
 }
 
 func WithFunc(initFn InitFunc, runFn RunFunc) Runner {
-	return &genericService{getFunctionName(runFn), initFn, runFn}
+	return newGenericService(getFunctionName(runFn), initFn, runFn)
 }
