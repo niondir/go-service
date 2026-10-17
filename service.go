@@ -138,6 +138,8 @@ type Container struct {
 	runCtxCancel context.CancelCauseFunc
 	services     []*serviceInfo
 	log          *slog.Logger
+	// clog is log with the container name attached
+	clog *slog.Logger
 
 	stoppingLogOnce sync.Once
 	// stoppingLogged is closed after "Stopping all services" was logged
@@ -168,6 +170,7 @@ func NewContainer(opts ...Option) *Container {
 	for _, o := range opts {
 		o(c)
 	}
+	c.clog = c.log.With("container", c.name)
 	return c
 }
 
@@ -181,8 +184,7 @@ var defaultContainer *Container
 
 func Default() *Container {
 	if defaultContainer == nil {
-		defaultContainer = NewContainer()
-		defaultContainer.name = "default"
+		defaultContainer = NewContainer(WithName("default"))
 	}
 	return defaultContainer
 }
@@ -193,11 +195,12 @@ func (c *Container) Name() string {
 
 func (c *Container) SetLogger(logger *slog.Logger) {
 	c.log = logger
+	c.clog = logger.With("container", c.name)
 }
 
 // logger returns the logger with the container name attached
 func (c *Container) logger() *slog.Logger {
-	return c.log.With("container", c.name)
+	return c.clog
 }
 
 // Register adds a service to the list of services to be initialized
@@ -380,12 +383,9 @@ func (c *Container) isStopping() bool {
 }
 
 // waitStoppingLogged blocks until "Stopping all services" was logged, to keep the log order.
+// Every claimed stop triggers a shutdown, a done parent context via watchParent.
 func (c *Container) waitStoppingLogged() {
-	select {
-	case <-c.stoppingLogged:
-	case <-time.After(time.Second):
-		// Safety net, should not happen since every claimed stop triggers a shutdown
-	}
+	<-c.stoppingLogged
 }
 
 // shutdown logs the stop cause, cancels all services and then runs the shutdown callbacks.
@@ -456,9 +456,17 @@ func (c *Container) StartAll(ctx context.Context) error {
 	// Iterate over all services to initialize them
 	for i := range c.services {
 		s := c.services[i]
+		if c.isStopping() {
+			return c.abortStart(c.services[i:])
+		}
 		// TODO: Should we allow services to optionally initialize in parallel? Then we might get multiple errors returned
 		err := c.initOne(c.runCtx, s)
 		if err != nil {
+			if isContextErr(err) && c.isStopping() {
+				// Init returned because the parent context is done, this is not an init failure
+				c.logger().Info("Service init aborted", "service", s.name, "error", err)
+				return c.abortStart(c.services[i+1:])
+			}
 			c.handleInitError(s, i, err)
 			return fmt.Errorf("failed to init service %s: %w", s.name, err)
 		}
@@ -470,12 +478,7 @@ func (c *Container) StartAll(ctx context.Context) error {
 		c.startMu.Lock()
 		if c.isStopping() {
 			c.startMu.Unlock()
-			cause := c.StopCause()
-			// A service already failed or the parent context is done, do not start any further services
-			c.logger().Warn("Container is stopping, skip starting remaining services",
-				"skipped", serviceNames(c.services[i:]), "stop_cause", cause)
-			c.shutdown()
-			return fmt.Errorf("start aborted: %w", cause)
+			return c.abortStart(c.services[i:])
 		}
 		err := c.runOne(c.runCtx, s)
 		c.startMu.Unlock()
@@ -489,6 +492,16 @@ func (c *Container) StartAll(ctx context.Context) error {
 	c.logger().Info("All services started", "count", len(c.services))
 
 	return nil
+}
+
+// abortStart stops the container during StartAll because it is already stopping,
+// e.g. a service failed or the parent context is done.
+func (c *Container) abortStart(skipped []*serviceInfo) error {
+	cause := c.StopCause()
+	c.logger().Warn("Container is stopping, skip starting remaining services",
+		"skipped", serviceNames(skipped), "stop_cause", cause)
+	c.shutdown()
+	return fmt.Errorf("start aborted: %w", cause)
 }
 
 func (c *Container) handleInitError(s *serviceInfo, idx int, err error) {
@@ -560,6 +573,8 @@ func (c *Container) IsRunning() bool {
 
 // StopAll gracefully stops all services.
 // It is safe to call StopAll multiple times and from inside an OnShutdown callback.
+// The first call runs the OnShutdown callbacks. Later or concurrent calls do not wait for the callbacks,
+// use WaitAllStopped to wait for the services.
 func (c *Container) StopAll() {
 	if c.runCtxCancel == nil {
 		panic("call Container.StartAll() before StopAll()")
@@ -647,6 +662,11 @@ func (c *Container) WaitAllStopped(ctx context.Context) {
 	case <-allStopped:
 		c.stoppedLogOnce.Do(func() { c.logStopped(rcs) })
 	case <-ctx.Done():
+		if c.StopCause() == nil {
+			// The container was not stopped, the caller just stopped waiting
+			c.logger().Debug("Stopped waiting for services, container was not stopped", "cause", context.Cause(ctx))
+			return
+		}
 		c.logger().Warn("Timeout waiting for services to stop",
 			"cause", context.Cause(ctx),
 			"running", c.RunningServiceNames(),
@@ -717,6 +737,8 @@ func (c *Container) onStopped(rc *runContext) {
 
 // OnShutdown registers a callback that is called once when the container starts to stop.
 // The services are already canceled when the callback runs, so it can wait for them via WaitAllStopped.
+// The callback runs in the goroutine that triggered the stop. If a service calls StopAll() from its own Run(),
+// waiting for all services without a timeout in the callback blocks forever, since that service cannot return.
 // If the container is already shutting down, f is called immediately.
 func (c *Container) OnShutdown(f func()) {
 	c.mu.Lock()

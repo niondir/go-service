@@ -521,3 +521,38 @@ func TestContainerNameInLogs(t *testing.T) {
 	assert.Len(t, logs.grep("level=ERROR", "container=core", "service=db"), 1)
 	assert.Contains(t, c.ServiceErrors(), "core/db")
 }
+
+// Parent context canceled during Init: start is aborted, not reported as init failure
+func TestParentCancelDuringInit(t *testing.T) {
+	c, logs := newLoggedContainer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	service.New("db").Init(func(ctx context.Context) error {
+		cancel()
+		<-ctx.Done()
+		return ctx.Err()
+	}).Run(waitCtx).Register(c)
+	service.New("http").Init(func(ctx context.Context) error {
+		t.Error("init of http must not run")
+		return nil
+	}).Run(waitCtx).Register(c)
+
+	err := c.StartAll(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+	var stopErr *service.StopError
+	require.ErrorAs(t, c.StopCause(), &stopErr)
+	assert.Equal(t, service.StopReasonParentContext, stopErr.Reason)
+	assert.Empty(t, logs.grep("level=ERROR"))
+	assert.Len(t, logs.grep("Service init aborted", "service=db"), 1)
+	assert.Len(t, logs.grep("skip starting remaining services", "skipped=[http]"), 1)
+}
+
+// Stop waiting without stopping the container is not a timeout warning
+func TestWaitAllStoppedWithoutStopIsNoWarning(t *testing.T) {
+	c, logs := newLoggedContainer(t)
+	service.New("db").Run(waitCtx).Register(c)
+	require.NoError(t, c.StartAll(context.Background()))
+	waitStopped(c, 10*time.Millisecond)
+	assert.Empty(t, logs.grep("level=WARN"))
+	c.StopAll()
+	waitStopped(c, time.Second)
+}
