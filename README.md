@@ -103,13 +103,53 @@ All services also stop if any `Run()` function returns an error.
 You can actively wait for all services to stop:
 
 ```
-	c.WaitAllStopped()
-	// or with timeout
-	c.WaitAllStoppedTimeout(time.Second)
+	// Blocks until all services stopped or ctx is done
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c.WaitAllStopped(ctx)
 
-	// You can check for any errors that might have caused the services to stop
+	// Why did the container stop? nil if it was not stopped.
+	// The error is a *service.StopError with Reason, Service and the underlying Err.
+	cause := c.StopCause()
+
+	// All errors returned by Run(), including errors returned during shutdown.
+	// Keys are "<container name>/<service name>".
 	errs := c.ServiceErrors()
+
+	// After WaitAllStopped returned because ctx was done: which services did not stop yet?
+	names := c.RunningServiceNames()
 ```
+
+When the container stops, the first trigger is recorded as stop cause. Possible reasons:
+`service failed`, `service init failed`, `service panicked`, `service start failed`,
+`StopAll called` and `parent context done`. A done parent context always wins, also if `StopAll()` is called right after it.
+
+`OnShutdown` callbacks are called once for every stop path. The services are already canceled when the callbacks run,
+so a callback can wait for them with `WaitAllStopped`. Calling `StopAll()` inside a callback is safe.
+If the container starts to stop while `StartAll` is still starting services (a service failed or the parent context is done),
+the remaining services are not started and `StartAll` returns an error that wraps the stop cause.
+
+A panic in `Init()` or `Run()` is recovered and handled like an error returned by the service.
+The error is a `*service.PanicError` that contains the panic value and the stack trace.
+
+## Logging
+
+Set a `*slog.Logger` with `c.SetLogger(logger)` to get lifecycle logs. All lines carry a `container` attribute
+(set via `service.NewContainer(service.WithName("core"))`), all service related lines a `service` attribute.
+
+| Level | Message | When |
+|-------|---------|------|
+| INFO  | `Starting service`, `All services started` | Start |
+| ERROR | `Failed to initialize service`, `Service panicked during init` | `Init()` failed |
+| WARN  | `Services not started because of init failure` | Lists services that ran `Init()` (`initialized`) and all services that were not started (`not_started`) |
+| ERROR | `Service failed`, `Service panicked` | The service that caused the shutdown |
+| INFO / WARN | `Stopping all services` | Once per container, with `reason`, `service` and `error`. WARN if a service caused it |
+| INFO  | `Service stopped` | Service stopped during shutdown, also when it returned `context.Canceled` |
+| WARN  | `Service stopped with error during shutdown` | Follow-up error after the shutdown started, with `error` and `stop_cause` (and `stack` after a panic) |
+| WARN  | `Service stopped unexpectedly` | `Run()` returned `nil` before the container was stopped |
+| WARN  | `Container is stopping, skip starting remaining services` | A service failed while `StartAll` was still starting services |
+| WARN  | `Timeout waiting for services to stop` | `WaitAllStopped` returned because ctx was done, lists `running` services |
+| INFO  | `All services stopped` | All services stopped, with `count` (services that ran), `failed` (the stop cause plus services with errors other than context errors) and `stop_cause` |
 
 ## Service names
 
