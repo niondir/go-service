@@ -30,7 +30,10 @@ func TestWithRunFunc(t *testing.T) {
 	t.Logf("Services: %v", c.ServiceNames())
 	require.NoError(t, err)
 	cancel()
-	c.WaitAllStoppedTimeout(time.Second)
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	c.WaitAllStopped(shutdownCtx)
 	require.True(t, started)
 	require.True(t, stopped)
 }
@@ -63,7 +66,10 @@ func TestWithFunc(t *testing.T) {
 	t.Logf("Services: %v", c.ServiceNames())
 	require.NoError(t, err)
 	cancel()
-	c.WaitAllStoppedTimeout(time.Second)
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	c.WaitAllStopped(shutdownCtx)
 	require.True(t, initialized)
 	require.True(t, started)
 	require.True(t, stopped)

@@ -1,0 +1,47 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+      - feature/**
+      - update/**
+      - fix/**
+      - dependabot/**
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  pull_request:
+    types: [ opened, edited ,reopened ]
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+
+concurrency:
+  group: "${{ github.workflow }}-${{ (github.ref_type == 'tag') && 'main' || github.ref_name }}"
+  cancel-in-progress: ${{ github.ref_type == 'tag' || github.ref_name != 'main' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CGO_ENABLED: 0
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+      - name: install go dependencies
+        run: go mod download all
+      - name: go generate
+        run: go generate ./...
+      - name: Test
+        run: go test ./...
+
+        # If a build fails due to a missing go.sum entry: Run `go mod tidy`, then `go mod download all` and commit the changes.
+        #build-go
+

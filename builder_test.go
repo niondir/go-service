@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"testing"
+	"time"
 )
 
 func TestServiceBuilder(t *testing.T) {
@@ -30,13 +31,24 @@ func TestServiceBuilder(t *testing.T) {
 		}).
 		Register(c)
 
-	err := c.StartAll(context.Background())
+	ctx := context.Background()
+	err := c.StartAll(ctx)
 	require.NoError(t, err)
 	c.StopAll()
-	c.WaitAllStopped()
+	c.WaitAllStopped(ctx)
 
 	assert.Len(t, c.ServiceErrors(), 0)
 	assert.True(t, initialized)
 	assert.True(t, run)
 	assert.True(t, stopped)
+}
+
+func TestCtx(t *testing.T) {
+	parent, cancelParent := context.WithTimeout(context.Background(), time.Second)
+	defer cancelParent()
+	_, cancel := context.WithCancel(parent)
+	cancel()
+
+	<-parent.Done()
+	assert.Equal(t, context.DeadlineExceeded, parent.Err())
 }

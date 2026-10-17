@@ -130,7 +130,7 @@ func TestStartAndStopWithContext(t *testing.T) {
 	require.NoError(t, err)
 
 	cancelCtx()
-	c.WaitAllStopped()
+	c.WaitAllStopped(context.Background())
 	assert.Len(t, c.ServiceErrors(), 0)
 	assertServiceStartedAndStopped(t, s1)
 }
@@ -145,7 +145,9 @@ func TestStartAndStopWithContext_timeout(t *testing.T) {
 	err := c.StartAll(context.Background())
 	require.NoError(t, err)
 
-	c.WaitAllStoppedTimeout(100 * time.Millisecond)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	c.WaitAllStopped(shutdownCtx)
 	assert.Len(t, c.ServiceErrors(), 0)
 	assertServiceStillRunning(t, s1)
 }
@@ -167,7 +169,7 @@ func TestStartAndStop(t *testing.T) {
 	require.NoError(t, err)
 
 	c.StopAll()
-	c.WaitAllStopped()
+	c.WaitAllStopped(context.Background())
 	assert.Len(t, c.ServiceErrors(), 0)
 	assertServiceStartedAndStopped(t, s1)
 	assertServiceStartedAndStopped(t, s2)
@@ -207,7 +209,7 @@ func TestServiceCanReturnWithoutError(t *testing.T) {
 	assert.Equal(t, 2, c.RunningCount())
 
 	c.StopAll()
-	c.WaitAllStopped()
+	c.WaitAllStopped(context.Background())
 	assert.Len(t, c.ServiceErrors(), 0)
 	assertServiceStartedAndStopped(t, s1)
 	assertServiceStartedAndStopped(t, s2)
@@ -239,7 +241,7 @@ func TestStopWhenInitFails(t *testing.T) {
 	require.Error(t, err)
 
 	// Expect all services to stop, since there was an error
-	c.WaitAllStopped()
+	c.WaitAllStopped(context.Background())
 	assert.Len(t, c.ServiceErrors(), 0)
 	assertServiceOnlyInitialized(t, s1)
 	assertServiceNeverStarted(t, s2)
@@ -271,12 +273,12 @@ func TestStopWhenRunFails(t *testing.T) {
 	require.NoError(t, err)
 
 	// Expect all services to stop, since there was an error
-	c.WaitAllStopped()
+	c.WaitAllStopped(context.Background())
 
 	require.Len(t, c.ServiceErrors(), 1)
 	errs := c.ServiceErrors()
 
-	assert.NotNil(t, errs[s2.String()])
+	assert.NotNil(t, errs["/"+s2.String()])
 
 	assertServiceStartedAndStopped(t, s1)
 	assertServiceStartedAndStopped(t, s2)
@@ -309,12 +311,12 @@ func TestErrorOnShutdown(t *testing.T) {
 
 	// Stop all services, s2 will return an error
 	c.StopAll()
-	c.WaitAllStopped()
+	c.WaitAllStopped(context.Background())
 
 	require.Len(t, c.ServiceErrors(), 1)
 	errs := c.ServiceErrors()
 
-	assert.NotNil(t, errs[s2.String()])
+	assert.NotNil(t, errs["/"+s2.String()])
 
 	assertServiceStartedAndStopped(t, s1)
 	assertServiceStartedAndStopped(t, s2)
@@ -380,7 +382,9 @@ func TestNotifyOnShutdown(t *testing.T) {
 		t.Fatal("timeout, expected context to be canceled")
 	}
 
-	c.WaitAllStoppedTimeout(100 * time.Millisecond)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	c.WaitAllStopped(shutdownCtx)
 	assert.Equal(t, 1, shutdownCalls)
 	assert.True(t, ctxIsDone)
 	assert.Len(t, c.ServiceErrors(), 2)

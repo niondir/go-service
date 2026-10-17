@@ -1,6 +1,9 @@
 package service
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Runner defines the interface to execute service related code in background
 
@@ -18,6 +21,9 @@ type Initer interface {
 	Init(ctx context.Context) error
 }
 
-type Waiter interface {
-	wait()
+// TODO: We want to refactor this to accept a context, but we have legacy code to support
+type ReadyWaiter interface {
+	// WaitReady blocks until the service is ready or the timeout is reached
+	// It returns true if the service is ready, false if the timeout is reached
+	WaitReady(timeout time.Duration) bool
 }
