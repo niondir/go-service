@@ -173,6 +173,40 @@ func TestOnShutdownBeforeStartAll_FiresOnInitFailure(t *testing.T) {
 	}
 }
 
+// Finding 2: the callbacks are claimed before the run context is canceled. A goroutine that wakes up because the
+// services were canceled and registers a callback at that moment must see the shutdown as started, so the callback runs
+// immediately (documented on OnShutdown). With the claim after the cancel the callback would only be queued.
+// The many children widen the time the cancel takes after the done channel was closed, so the check is reliable.
+func TestOnShutdownRegisteredWhileCanceling_RunsImmediately(t *testing.T) {
+	c, _ := newLoggedContainer(t)
+	var mainCalls atomic.Int32
+	c.OnShutdown(func() { mainCalls.Add(1) })
+	type result struct{ ranImmediately bool }
+	res := make(chan result, 1)
+	service.New("db").Init(func(ctx context.Context) error {
+		go func() {
+			<-ctx.Done()
+			var ran atomic.Bool
+			c.OnShutdown(func() { ran.Store(true) })
+			res <- result{ran.Load()}
+		}()
+		for i := 0; i < 50_000; i++ {
+			_, cancel := context.WithCancel(ctx)
+			_ = cancel
+		}
+		return errors.New("init failed")
+	}).Run(waitCtx).Register(c)
+
+	require.Error(t, c.StartAll(context.Background()))
+	select {
+	case r := <-res:
+		assert.True(t, r.ranImmediately, "callback registered after the services were canceled was only queued")
+	case <-time.After(3 * time.Second):
+		t.Fatal("goroutine did not register the callback")
+	}
+	assert.Equal(t, int32(1), mainCalls.Load())
+}
+
 // Finding 2: OnShutdown registered before StartAll fires on a panic/error during Run (start phase).
 func TestOnShutdownBeforeStartAll_FiresOnRunFailure(t *testing.T) {
 	tests := map[string]func(ctx context.Context) error{
@@ -381,11 +415,12 @@ func TestLogAttr_ServiceKeyNotName(t *testing.T) {
 			return ctx, cancel
 		}, []string{"Service init aborted"}},
 		{"run panic with follow-up error", func(c *service.Container) (context.Context, context.CancelFunc) {
-			service.New("parser").Run(boom).Register(c)
+			// "other" is registered first, so it is started before "parser" panics
 			service.New("other").Run(func(ctx context.Context) error {
 				<-ctx.Done()
 				return errors.New("follow-up")
 			}).Register(c)
+			service.New("parser").Run(boom).Register(c)
 			return context.WithCancel(context.Background())
 		}, []string{"Service panicked", "Service stopped with error during shutdown"}},
 		{"run error", func(c *service.Container) (context.Context, context.CancelFunc) {

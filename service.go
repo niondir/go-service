@@ -745,7 +745,8 @@ func (c *Container) onStopped(rc *runContext) {
 // was canceled first. In the first cases it has finished when StartAll() or StopAll() returns,
 // except when another goroutine already started the shutdown. If a service calls StopAll() from its own Run(),
 // waiting for all services without a timeout in the callback blocks forever, since that service cannot return.
-// If the container is already shutting down, f is called immediately.
+// If the container is already shutting down, f is called immediately. This includes the short window between the
+// begin of the shutdown and the cancel of the services, so f can run before the services are canceled.
 func (c *Container) OnShutdown(f func()) {
 	c.mu.Lock()
 	if c.shutdownStarted {
