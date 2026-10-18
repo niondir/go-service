@@ -28,11 +28,28 @@ func waitSignal(t *testing.T, ch <-chan struct{}, what string) {
 	}
 }
 
+// mustStop waits until all services stopped and fails on timeout, unlike waitStopped.
+func mustStop(t *testing.T, c *service.Container) {
+	t.Helper()
+	waitStopped(c, 2*time.Second)
+	require.Equal(t, 0, c.RunningCount(), "services still running after timeout: %v", c.RunningServiceNames())
+}
+
+// requireStopReason fails unless StopCause() is a *StopError with the given reason.
+func requireStopReason(t *testing.T, c *service.Container, reason service.StopReason) *service.StopError {
+	t.Helper()
+	var stopErr *service.StopError
+	require.ErrorAs(t, c.StopCause(), &stopErr)
+	require.Equal(t, reason, stopErr.Reason)
+	return stopErr
+}
+
 // isUnexpectedStop is what a backend main() uses to derive a non-zero exit code from StopCause().
+// A cause that is not a *StopError is treated as unexpected.
 func isUnexpectedStop(cause error) bool {
 	var stopErr *service.StopError
 	if !errors.As(cause, &stopErr) {
-		return false
+		return cause != nil
 	}
 	switch stopErr.Reason {
 	case service.StopReasonStopAll, service.StopReasonParentContext:
@@ -59,7 +76,7 @@ func TestPanicStopCause_RunAndInit(t *testing.T) {
 			service.New("healthy").Run(waitCtx).Register(c)
 			tt.register(c)
 			_ = c.StartAll(context.Background())
-			waitStopped(c, time.Second)
+			mustStop(t, c)
 
 			cause := c.StopCause()
 			require.Error(t, cause)
@@ -79,38 +96,34 @@ func TestPanicStopCause_RunAndInit(t *testing.T) {
 
 // Finding 1: panic, parent cancel and StopAll are distinguishable, only the panic means exit code != 0.
 func TestStopCause_DistinguishPanicFromParentCancelAndStopAll(t *testing.T) {
-	// parent cancel
-	c, _ := newLoggedContainer(t)
-	service.New("db").Run(returnCtxErr).Register(c)
-	ctx, cancel := context.WithCancel(context.Background())
-	require.NoError(t, c.StartAll(ctx))
-	cancel()
-	waitStopped(c, time.Second)
-	parentCause := c.StopCause()
+	tests := []struct {
+		name       string
+		reason     service.StopReason
+		trigger    func(c *service.Container, cancel context.CancelFunc)
+		run        service.RunFunc
+		unexpected bool
+		isPanic    bool
+	}{
+		{"parent cancel", service.StopReasonParentContext, func(c *service.Container, cancel context.CancelFunc) { cancel() }, returnCtxErr, false, false},
+		{"StopAll", service.StopReasonStopAll, func(c *service.Container, cancel context.CancelFunc) { c.StopAll() }, returnCtxErr, false, false},
+		{"panic", service.StopReasonPanic, func(c *service.Container, cancel context.CancelFunc) {}, func(ctx context.Context) error { panic("boom") }, true, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, _ := newLoggedContainer(t)
+			service.New("db").Run(tt.run).Register(c)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			require.NoError(t, c.StartAll(ctx))
+			tt.trigger(c, cancel)
+			mustStop(t, c)
 
-	// StopAll
-	c2, _ := newLoggedContainer(t)
-	service.New("db").Run(returnCtxErr).Register(c2)
-	require.NoError(t, c2.StartAll(context.Background()))
-	c2.StopAll()
-	waitStopped(c2, time.Second)
-	stopAllCause := c2.StopCause()
-
-	// panic
-	c3, _ := newLoggedContainer(t)
-	service.New("db").Run(func(ctx context.Context) error { panic("boom") }).Register(c3)
-	require.NoError(t, c3.StartAll(context.Background()))
-	waitStopped(c3, time.Second)
-	panicCause := c3.StopCause()
-
-	assert.False(t, isUnexpectedStop(parentCause))
-	assert.False(t, isUnexpectedStop(stopAllCause))
-	assert.True(t, isUnexpectedStop(panicCause))
-
-	var pe *service.PanicError
-	assert.False(t, errors.As(parentCause, &pe))
-	assert.False(t, errors.As(stopAllCause, &pe))
-	assert.True(t, errors.As(panicCause, &pe))
+			requireStopReason(t, c, tt.reason)
+			assert.Equal(t, tt.unexpected, isUnexpectedStop(c.StopCause()))
+			var pe *service.PanicError
+			assert.Equal(t, tt.isPanic, errors.As(c.StopCause(), &pe))
+		})
+	}
 }
 
 // Finding 1: a Run error is an unexpected stop, a nil return before the stop is no stop at all.
@@ -119,7 +132,7 @@ func TestStopCause_RunErrorIsUnexpected(t *testing.T) {
 	runErr := errors.New("run failed")
 	service.New("worker").Run(func(ctx context.Context) error { return runErr }).Register(c)
 	require.NoError(t, c.StartAll(context.Background()))
-	waitStopped(c, time.Second)
+	mustStop(t, c)
 	var stopErr *service.StopError
 	require.ErrorAs(t, c.StopCause(), &stopErr)
 	assert.Equal(t, service.StopReasonServiceFailed, stopErr.Reason)
@@ -135,7 +148,7 @@ func TestStopCause_NilBeforeStopIsNoStop(t *testing.T) {
 	require.Eventually(t, func() bool { return c.RunningCount() == 1 }, time.Second, time.Millisecond)
 	assert.NoError(t, c.StopCause())
 	c.StopAll()
-	waitStopped(c, time.Second)
+	mustStop(t, c)
 }
 
 // Finding 2: OnShutdown registered before StartAll fires on a panic/error during Init.
@@ -154,7 +167,7 @@ func TestOnShutdownBeforeStartAll_FiresOnInitFailure(t *testing.T) {
 			require.Error(t, c.StartAll(context.Background()))
 			// The callback runs synchronously in StartAll when Init fails
 			assert.Equal(t, int32(1), calls.Load())
-			waitStopped(c, time.Second)
+			mustStop(t, c)
 			assert.Equal(t, int32(1), calls.Load(), "called exactly once")
 		})
 	}
@@ -176,7 +189,7 @@ func TestOnShutdownBeforeStartAll_FiresOnRunFailure(t *testing.T) {
 
 			_ = c.StartAll(context.Background())
 			waitSignal(t, called, "OnShutdown")
-			waitStopped(c, time.Second)
+			mustStop(t, c)
 			select {
 			case <-called:
 				t.Fatal("OnShutdown called twice")
@@ -192,7 +205,7 @@ func TestOnShutdownAfterStop_FiresImmediately(t *testing.T) {
 	service.New("db").Run(waitCtx).Register(c)
 	require.NoError(t, c.StartAll(context.Background()))
 	c.StopAll()
-	waitStopped(c, time.Second)
+	mustStop(t, c)
 
 	var calls atomic.Int32
 	c.OnShutdown(func() { calls.Add(1) })
@@ -241,7 +254,7 @@ func TestStopAllDuringStart_IsIntendedStop(t *testing.T) {
 	require.ErrorAs(t, c.StopCause(), &stopErr)
 	assert.Equal(t, service.StopReasonStopAll, stopErr.Reason)
 	assert.False(t, isUnexpectedStop(c.StopCause()))
-	waitStopped(c, time.Second)
+	mustStop(t, c)
 	assert.Equal(t, 0, c.RunningCount())
 }
 
@@ -268,7 +281,7 @@ func TestOnShutdownParentCancel_Async(t *testing.T) {
 
 	waitSignal(t, callbackStarted, "OnShutdown start")
 	// Services are stopped while the callback still blocks: WaitAllStopped does not wait for the callback.
-	waitStopped(c, time.Second)
+	mustStop(t, c)
 	select {
 	case <-callbackDone:
 		t.Fatal("callback finished before it was released")
@@ -287,7 +300,7 @@ func TestServiceErrorsAfterParentCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	require.NoError(t, c.StartAll(ctx))
 	cancel()
-	waitStopped(c, time.Second)
+	mustStop(t, c)
 
 	errs := c.ServiceErrors()
 	assert.NotContains(t, errs, "/clean")
@@ -305,120 +318,117 @@ func TestServiceErrorsAfterParentCancel_CleanServices(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	require.NoError(t, c.StartAll(ctx))
 	cancel()
-	waitStopped(c, time.Second)
+	mustStop(t, c)
 	assert.Empty(t, c.ServiceErrors())
 }
 
-type recordHandler struct {
-	mu      *sync.Mutex
-	records *[]map[string]any
-	attrs   []slog.Attr
+// containerLevelMessages are lifecycle messages that describe the whole container and have no service attribute.
+var containerLevelMessages = map[string]bool{
+	"All services started":  true,
+	"All services stopped":  true,
+	"Stopping all services": true,
+	"Container is stopping, skip starting remaining services": true,
+	"Services not started because of init failure":            true,
 }
 
-func (h recordHandler) Enabled(context.Context, slog.Level) bool { return true }
-func (h recordHandler) Handle(_ context.Context, r slog.Record) error {
-	m := map[string]any{"msg": r.Message}
-	for _, a := range h.attrs {
-		m[a.Key] = a.Value.Any()
-	}
-	r.Attrs(func(a slog.Attr) bool {
-		m[a.Key] = a.Value.Any()
-		return true
-	})
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	*h.records = append(*h.records, m)
-	return nil
-}
-func (h recordHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	h.attrs = append(append([]slog.Attr{}, h.attrs...), attrs...)
-	return h
-}
-func (h recordHandler) WithGroup(string) slog.Handler { return h }
-
-// Finding 4: lifecycle log lines use the key "service", never "name".
-func TestLogAttr_ServiceKeyNotName(t *testing.T) {
-	var mu sync.Mutex
+// logRecords decodes the JSON log lines
+func logRecords(t *testing.T, logs *logBuffer) []map[string]any {
+	t.Helper()
+	logs.mu.Lock()
+	defer logs.mu.Unlock()
 	var records []map[string]any
-	c := service.NewContainer(service.WithName("main"))
-	c.SetLogger(slog.New(recordHandler{mu: &mu, records: &records}))
-
-	service.New("db").Init(func(ctx context.Context) error { return nil }).Run(returnCtxErr).Register(c)
-	service.New("parser").Run(func(ctx context.Context) error { panic("boom") }).Register(c)
-	_ = c.StartAll(context.Background())
-	waitStopped(c, time.Second)
-
-	c3 := service.NewContainer(service.WithName("run"))
-	c3.SetLogger(slog.New(recordHandler{mu: &mu, records: &records}))
-	service.New("worker").Run(func(ctx context.Context) error { return errors.New("failed") }).Register(c3)
-	_ = c3.StartAll(context.Background())
-	waitStopped(c3, time.Second)
-
-	c2 := service.NewContainer(service.WithName("init"))
-	c2.SetLogger(slog.New(recordHandler{mu: &mu, records: &records}))
-	service.New("bad").Init(func(ctx context.Context) error { panic("boom") }).Register(c2)
-	_ = c2.StartAll(context.Background())
-
-	mu.Lock()
-	defer mu.Unlock()
-	require.NotEmpty(t, records)
-	perMessage := map[string]bool{}
-	for _, r := range records {
-		assert.NotContains(t, r, "name", "message %q uses key name", r["msg"])
-		assert.Contains(t, r, "container", "message %q has no container attr", r["msg"])
-		msg := r["msg"].(string)
-		if msg == "All services started" || msg == "All services stopped" || msg == "Stopping all services" ||
-			msg == "Container is stopping, skip starting remaining services" {
-			continue
-		}
-		if msg == "Services not started because of init failure" {
-			continue
-		}
-		assert.NotEmpty(t, r["service"], "message %q misses the service attribute", msg)
-		perMessage[msg] = true
-	}
-	for _, msg := range []string{"Registered service", "Initializing service", "Initialized service", "Starting service",
-		"Service panicked", "Service failed", "Service panicked during init"} {
-		assert.True(t, perMessage[msg], "message %q misses the service attribute", msg)
-	}
-}
-
-// Finding 4: same check with the real JSON handler, so the key is visible in the actual output.
-func TestLogAttr_ServiceKeyJSON(t *testing.T) {
-	var buf bytes.Buffer
-	var mu sync.Mutex
-	c := service.NewContainer(service.WithName("main"))
-	c.SetLogger(slog.New(slog.NewJSONHandler(&lockedWriter{mu: &mu, w: &buf}, nil)))
-	service.New("db").Init(func(ctx context.Context) error { return nil }).Run(waitCtx).Register(c)
-	require.NoError(t, c.StartAll(context.Background()))
-	c.StopAll()
-	waitStopped(c, time.Second)
-
-	mu.Lock()
-	defer mu.Unlock()
-	dec := json.NewDecoder(&buf)
-	found := 0
+	dec := json.NewDecoder(bytes.NewReader(logs.buf.Bytes()))
 	for dec.More() {
 		var m map[string]any
 		require.NoError(t, dec.Decode(&m))
-		assert.NotContains(t, m, "name")
-		if m["msg"] == "Starting service" {
-			assert.Equal(t, "db", m["service"])
-			found++
-		}
+		records = append(records, m)
 	}
-	assert.Equal(t, 1, found)
+	return records
 }
 
-type lockedWriter struct {
-	mu *sync.Mutex
-	w  *bytes.Buffer
-}
+// Finding 4: all lifecycle log lines use the key "service", never "name". The real JSON handler is used,
+// so a group prefix would show up as nested object.
+func TestLogAttr_ServiceKeyNotName(t *testing.T) {
+	boom := func(ctx context.Context) error { panic("boom") }
+	fail := func(ctx context.Context) error { return errors.New("failed") }
+	tests := []struct {
+		name string
+		// setup registers the services and returns the context for StartAll
+		setup func(c *service.Container) (context.Context, context.CancelFunc)
+		// messages that must have been logged with a service attribute
+		want []string
+	}{
+		{"healthy start and StopAll", func(c *service.Container) (context.Context, context.CancelFunc) {
+			service.New("db").Init(func(ctx context.Context) error { return nil }).Run(waitCtx).Register(c)
+			return context.WithCancel(context.Background())
+		}, []string{"Registered service", "Initializing service", "Initialized service", "Starting service", "Service stopped"}},
+		{"init error", func(c *service.Container) (context.Context, context.CancelFunc) {
+			service.New("db").Init(func(ctx context.Context) error { return nil }).Run(waitCtx).Register(c)
+			service.New("bad").Init(func(ctx context.Context) error { return errors.New("nope") }).Register(c)
+			return context.WithCancel(context.Background())
+		}, []string{"Failed to initialize service"}},
+		{"init panic", func(c *service.Container) (context.Context, context.CancelFunc) {
+			service.New("bad").Init(boom).Register(c)
+			return context.WithCancel(context.Background())
+		}, []string{"Service panicked during init"}},
+		{"init aborted by parent cancel", func(c *service.Container) (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(context.Background())
+			service.New("slow").Init(func(ctx context.Context) error {
+				cancel()
+				<-ctx.Done()
+				return ctx.Err()
+			}).Register(c)
+			return ctx, cancel
+		}, []string{"Service init aborted"}},
+		{"run panic with follow-up error", func(c *service.Container) (context.Context, context.CancelFunc) {
+			service.New("parser").Run(boom).Register(c)
+			service.New("other").Run(func(ctx context.Context) error {
+				<-ctx.Done()
+				return errors.New("follow-up")
+			}).Register(c)
+			return context.WithCancel(context.Background())
+		}, []string{"Service panicked", "Service stopped with error during shutdown"}},
+		{"run error", func(c *service.Container) (context.Context, context.CancelFunc) {
+			service.New("worker").Run(fail).Register(c)
+			return context.WithCancel(context.Background())
+		}, []string{"Service failed"}},
+		{"unexpected stop", func(c *service.Container) (context.Context, context.CancelFunc) {
+			service.New("worker").Run(func(ctx context.Context) error { return nil }).Register(c)
+			service.New("http").Run(waitCtx).Register(c)
+			return context.WithCancel(context.Background())
+		}, []string{"Service stopped unexpectedly, Run() returned nil before the container was stopped. Other services keep running."}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logs := &logBuffer{}
+			c := service.NewContainer(service.WithName("main"))
+			c.SetLogger(slog.New(slog.NewJSONHandler(logs, nil)))
+			ctx, cancel := tt.setup(c)
+			defer cancel()
+			_ = c.StartAll(ctx)
+			if c.StopCause() == nil {
+				time.Sleep(20 * time.Millisecond)
+				c.StopAll()
+			}
+			mustStop(t, c)
 
-func (l *lockedWriter) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.w.Write(p)
+			seen := map[string]bool{}
+			for _, r := range logRecords(t, logs) {
+				msg := r["msg"].(string)
+				assert.NotContains(t, r, "name", "message %q uses key name", msg)
+				assert.Contains(t, r, "container", "message %q has no container attr", msg)
+				if containerLevelMessages[msg] {
+					continue
+				}
+				assert.IsType(t, "", r["service"], "message %q misses the service attribute", msg)
+				assert.NotEmpty(t, r["service"], "message %q has an empty service attribute", msg)
+				seen[msg] = true
+			}
+			for _, msg := range tt.want {
+				assert.True(t, seen[msg], "message %q was not logged", msg)
+			}
+		})
+	}
 }
 
 // Finding 5: StartAll error wraps the original error and names the service.
