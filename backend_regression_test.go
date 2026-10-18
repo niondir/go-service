@@ -113,7 +113,20 @@ func TestStopCause_DistinguishPanicFromParentCancelAndStopAll(t *testing.T) {
 	assert.True(t, errors.As(panicCause, &pe))
 }
 
-// Finding 1/2: a service returning an error and one returning nil early are also unexpected stops or not stops at all.
+// Finding 1: a Run error is an unexpected stop, a nil return before the stop is no stop at all.
+func TestStopCause_RunErrorIsUnexpected(t *testing.T) {
+	c, _ := newLoggedContainer(t)
+	runErr := errors.New("run failed")
+	service.New("worker").Run(func(ctx context.Context) error { return runErr }).Register(c)
+	require.NoError(t, c.StartAll(context.Background()))
+	waitStopped(c, time.Second)
+	var stopErr *service.StopError
+	require.ErrorAs(t, c.StopCause(), &stopErr)
+	assert.Equal(t, service.StopReasonServiceFailed, stopErr.Reason)
+	assert.ErrorIs(t, c.StopCause(), runErr)
+	assert.True(t, isUnexpectedStop(c.StopCause()))
+}
+
 func TestStopCause_NilBeforeStopIsNoStop(t *testing.T) {
 	c, _ := newLoggedContainer(t)
 	service.New("worker").Run(func(ctx context.Context) error { return nil }).Register(c)
@@ -238,6 +251,9 @@ func TestOnShutdownParentCancel_Async(t *testing.T) {
 	c, _ := newLoggedContainer(t)
 	service.New("db").Run(returnCtxErr).Register(c)
 	gate := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(gate) }) }
+	defer release()
 	callbackDone := make(chan struct{})
 	callbackStarted := make(chan struct{})
 	c.OnShutdown(func() {
@@ -258,7 +274,7 @@ func TestOnShutdownParentCancel_Async(t *testing.T) {
 		t.Fatal("callback finished before it was released")
 	default:
 	}
-	close(gate)
+	release()
 	waitSignal(t, callbackDone, "OnShutdown done")
 }
 
@@ -350,10 +366,16 @@ func TestLogAttr_ServiceKeyNotName(t *testing.T) {
 	for _, r := range records {
 		assert.NotContains(t, r, "name", "message %q uses key name", r["msg"])
 		assert.Contains(t, r, "container", "message %q has no container attr", r["msg"])
-		if s, ok := r["service"]; ok {
-			assert.NotEmpty(t, s)
-			perMessage[r["msg"].(string)] = true
+		msg := r["msg"].(string)
+		if msg == "All services started" || msg == "All services stopped" || msg == "Stopping all services" ||
+			msg == "Container is stopping, skip starting remaining services" {
+			continue
 		}
+		if msg == "Services not started because of init failure" {
+			continue
+		}
+		assert.NotEmpty(t, r["service"], "message %q misses the service attribute", msg)
+		perMessage[msg] = true
 	}
 	for _, msg := range []string{"Registered service", "Initializing service", "Initialized service", "Starting service",
 		"Service panicked", "Service failed", "Service panicked during init"} {
