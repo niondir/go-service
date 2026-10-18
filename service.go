@@ -390,10 +390,15 @@ func (c *Container) waitStoppingLogged() {
 
 // shutdown logs the stop cause, cancels all services and then runs the shutdown callbacks.
 // Callbacks run after the services were canceled, so they can wait for the services to stop.
+// The callbacks are claimed before the cancel. Canceling wakes watchParent, which also calls shutdown().
+// Claiming first makes the goroutine that triggered the stop the one that runs the callbacks.
 func (c *Container) shutdown() {
 	c.logStopping()
+	callbacks, first := c.claimShutdownCallbacks()
 	c.runCtxCancel(c.StopCause())
-	c.runShutdownCallbacks()
+	if first {
+		c.onStopAll(callbacks)
+	}
 }
 
 // logStopping logs the stop cause exactly once.
@@ -422,18 +427,16 @@ func (c *Container) logStopping() {
 	})
 }
 
-// runShutdownCallbacks runs the shutdown callbacks once. Later calls, e.g. StopAll() from inside a callback,
-// return immediately instead of waiting for the callbacks.
-func (c *Container) runShutdownCallbacks() {
+// claimShutdownCallbacks returns the shutdown callbacks and true for the first call only.
+// Later calls, e.g. StopAll() from inside a callback, return false and do not wait for the callbacks.
+func (c *Container) claimShutdownCallbacks() ([]func(), bool) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.shutdownStarted {
-		c.mu.Unlock()
-		return
+		return nil, false
 	}
 	c.shutdownStarted = true
-	callbacks := c.shutdownCallbacks
-	c.mu.Unlock()
-	c.onStopAll(callbacks)
+	return c.shutdownCallbacks, true
 }
 
 // watchParent triggers the shutdown when the run context is done, e.g. because the parent context was canceled.
@@ -737,9 +740,13 @@ func (c *Container) onStopped(rc *runContext) {
 
 // OnShutdown registers a callback that is called once when the container starts to stop.
 // The services are already canceled when the callback runs, so it can wait for them via WaitAllStopped.
-// The callback runs in the goroutine that triggered the stop. If a service calls StopAll() from its own Run(),
+// The callback runs in the goroutine that triggered the stop: the caller of StartAll() for an init or start failure,
+// the caller of StopAll(), the failing service's goroutine, or the container's parent watcher if the parent context
+// was canceled first. In the first cases it has finished when StartAll() or StopAll() returns,
+// except when another goroutine already started the shutdown. If a service calls StopAll() from its own Run(),
 // waiting for all services without a timeout in the callback blocks forever, since that service cannot return.
-// If the container is already shutting down, f is called immediately.
+// If the container is already shutting down, f is called immediately. This includes the short window between the
+// begin of the shutdown and the cancel of the services, so f can run before the services are canceled.
 func (c *Container) OnShutdown(f func()) {
 	c.mu.Lock()
 	if c.shutdownStarted {
