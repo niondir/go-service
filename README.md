@@ -120,6 +120,25 @@ You can actively wait for all services to stop:
 	names := c.RunningServiceNames()
 ```
 
+Wait until all services are ready (see `ReadyWaiter`) before you serve traffic:
+
+```
+	// Returns nil when all running services are ready. Otherwise an error:
+	//  - the *service.StopError (see StopCause) if the container stopped, also if a service failed while waiting
+	//  - an error wrapping context.Cause(ctx) if ctx is done
+	//  - an error wrapping service.ErrWaitRunningTimeout, naming the services that are not ready
+	// All goroutines of the call are finished when it returns.
+	if err := c.WaitAllRunning(ctx, 30*time.Second); err != nil {
+		var se *service.StopError
+		if errors.As(err, &se) {
+			// the real reason, e.g. se.Service failed with se.Err
+		}
+	}
+```
+
+`WaitAllRunningTimeout(timeout)` is deprecated. It returns only a bool, does not return when the container stops
+and keeps its goroutines until the timeout.
+
 When the container stops, the first trigger is recorded as stop cause. Possible reasons:
 `service failed`, `service init failed`, `service panicked`, `service start failed`,
 `StopAll called` and `parent context done`. A done parent context always wins, also if `StopAll()` is called right after it.
