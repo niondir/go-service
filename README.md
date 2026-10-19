@@ -136,6 +136,7 @@ Wait until all services are ready (see `ReadyWaiter`) before you serve traffic:
 	}
 ```
 
+`WaitAllRunning` panics if `StartAll` was not called. `WaitReady` is called in 20ms slices and must honor its timeout.
 `WaitAllRunningTimeout(timeout)` is deprecated. It returns only a bool, does not return when the container stops
 and keeps its goroutines until the timeout.
 

@@ -24,6 +24,7 @@ type Initer interface {
 // TODO: We want to refactor this to accept a context, but we have legacy code to support
 type ReadyWaiter interface {
 	// WaitReady blocks until the service is ready or the timeout is reached
-	// It returns true if the service is ready, false if the timeout is reached
+	// It returns true if the service is ready, false if the timeout is reached.
+	// It must honor the timeout and may be called repeatedly, Container.WaitAllRunning calls it in short slices.
 	WaitReady(timeout time.Duration) bool
 }

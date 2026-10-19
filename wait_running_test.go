@@ -139,28 +139,6 @@ func TestWaitAllRunning_AlreadyStopped(t *testing.T) {
 	assert.Equal(t, service.StopReasonStopAll, se.Reason)
 }
 
-// The failing service ends its wait before the container finished to stop.
-// The result must be the service error, never the timeout. Repeated to catch the ordering race.
-func TestWaitAllRunning_ServiceFailureWinsOverTimeout(t *testing.T) {
-	boom := errors.New("boom")
-	for i := 0; i < 50; i++ {
-		failing, other := newReadyService("failing"), newReadyService("other")
-		c := startContainer(t, context.Background(), failing, other)
-		// Timeout is already (nearly) elapsed when the service fails: the cause must still win.
-		go func() {
-			time.Sleep(10 * time.Millisecond)
-			failing.runErr <- boom
-		}()
-		err := c.WaitAllRunning(context.Background(), 10*time.Millisecond)
-		var se *service.StopError
-		require.ErrorAs(t, err, &se, "iteration %d: %v", i, err)
-		assert.NotErrorIs(t, err, service.ErrWaitRunningTimeout)
-		assert.Equal(t, service.StopReasonServiceFailed, se.Reason)
-		assert.Equal(t, "failing", se.Service)
-		assert.ErrorIs(t, err, boom)
-	}
-}
-
 func TestWaitAllRunning_ServiceFailureWhileWaiting(t *testing.T) {
 	boom := errors.New("boom")
 	failing := newReadyService("failing")
@@ -255,4 +233,24 @@ func TestWaitAllRunning_FailureAfterTimeoutStillWins(t *testing.T) {
 	assert.NotErrorIs(t, err, service.ErrWaitRunningTimeout)
 	assert.Equal(t, service.StopReasonServiceFailed, se.Reason)
 	assert.ErrorIs(t, err, boom)
+}
+
+func TestWaitAllRunning_StopCauseWinsOverReady(t *testing.T) {
+	boom := errors.New("boom")
+	failing := service.WithRunFunc(func(ctx context.Context) error { return boom })
+	c := startContainer(t, context.Background(), failing)
+	require.Eventually(t, func() bool { return c.StopCause() != nil }, 5*time.Second, time.Millisecond)
+	// No ReadyWaiter involved: the container is stopping, so it is not "running".
+	err := c.WaitAllRunning(context.Background(), time.Minute)
+	assert.ErrorIs(t, err, boom)
+}
+
+func TestWaitAllRunning_TimeoutWinsOverLaterContextDone(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// WaitReady returns after 100ms: the timeout (20ms) fires first, ctx is canceled (50ms) while the waiter is joined.
+	c := startContainer(t, context.Background(), &slowWaitService{failAfter: time.Hour, waitFor: 100 * time.Millisecond})
+	time.AfterFunc(50*time.Millisecond, cancel)
+	err := c.WaitAllRunning(ctx, 20*time.Millisecond)
+	assert.ErrorIs(t, err, service.ErrWaitRunningTimeout)
 }

@@ -559,7 +559,11 @@ const readyPollInterval = 20 * time.Millisecond
 //     the container stops too and the error is the *StopError (reason "parent context done") that unwraps to that cause.
 //   - the timeout elapses. The error wraps ErrWaitRunningTimeout and names the services that are not ready.
 //
-// All goroutines started by WaitAllRunning are finished when it returns.
+// A service whose Run returned nil is not waited for, as it is no longer running (see "Service stopped unexpectedly").
+//
+// WaitAllRunning calls ReadyWaiter.WaitReady repeatedly with short timeouts (20ms) to stay responsive,
+// so WaitReady must honor its timeout and be cheap to call. All goroutines started by WaitAllRunning
+// are finished when it returns.
 // Call it after StartAll returned without error. It panics if StartAll was not called.
 func (c *Container) WaitAllRunning(ctx context.Context, timeout time.Duration) error {
 	if c.runCtx == nil {
@@ -601,11 +605,13 @@ func (c *Container) WaitAllRunning(ctx context.Context, timeout time.Duration) e
 
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
+	timedOut := false
 	select {
 	case <-allDone:
 	case <-c.runCtx.Done():
 	case <-ctx.Done():
 	case <-timer.C:
+		timedOut = true
 	}
 	cancel()
 	<-allDone
@@ -613,18 +619,19 @@ func (c *Container) WaitAllRunning(ctx context.Context, timeout time.Duration) e
 	mu.Lock()
 	names := append([]string(nil), notReady...)
 	mu.Unlock()
-	if len(names) == 0 {
-		return nil
-	}
 	sort.Strings(names)
 
 	// A failing service records the stop cause before it ends, so the cause is visible here
 	// even if the wait ended before the container started to stop.
+	// Also checked if all services are ready: a container that is stopping is not running.
 	c.claimStop(nil)
 	if cause := c.getStopCause(); cause != nil {
 		return cause
 	}
-	if err := ctx.Err(); err != nil {
+	if len(names) == 0 {
+		return nil
+	}
+	if !timedOut && ctx.Err() != nil {
 		return fmt.Errorf("waiting for services to run, not ready: %v: %w", names, context.Cause(ctx))
 	}
 	return fmt.Errorf("%w after %s, not ready: %v", ErrWaitRunningTimeout, timeout, names)
