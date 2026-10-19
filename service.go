@@ -544,9 +544,120 @@ func serviceNames(services []*serviceInfo) []string {
 	return names
 }
 
-// WaitAllRunningTimeout blocks until all services are running or the context is canceled
-// NOTE: We want to introduce a version with context instead of the duration. But that needs some refactoring in current client
-// thus this will be deprecated in future and has the "Timeout" stated in the name
+// ErrWaitRunningTimeout is returned by WaitAllRunning when the services are not ready within the timeout.
+var ErrWaitRunningTimeout = errors.New("timeout waiting for services to run")
+
+// readyPollInterval is the slice in which WaitAllRunning calls ReadyWaiter.WaitReady,
+// so it can stop waiting when ctx is done or the container stops.
+const readyPollInterval = 20 * time.Millisecond
+
+// WaitAllRunning blocks until all running services are ready and returns nil.
+// Services that do not implement ReadyWaiter are ready as soon as they run. It returns an error if
+//   - the container is stopping or stops while waiting. The error is the *StopError of StopCause(),
+//     so the real reason (e.g. the failed service) is returned, never a timeout that only happened as a consequence.
+//   - ctx is done. The error wraps context.Cause(ctx). If ctx is the context passed to StartAll,
+//     the container stops too and the error is the *StopError (reason "parent context done") that unwraps to that cause.
+//   - the timeout elapses. The error wraps ErrWaitRunningTimeout and names the services that are not ready.
+//
+// A service whose Run returned nil is not waited for, as it is no longer running (see "Service stopped unexpectedly").
+//
+// WaitAllRunning calls ReadyWaiter.WaitReady repeatedly with short timeouts (20ms) to stay responsive,
+// so WaitReady must honor its timeout and be cheap to call. All goroutines started by WaitAllRunning
+// are finished when it returns.
+// Call it after StartAll returned without error. It panics if StartAll was not called.
+func (c *Container) WaitAllRunning(ctx context.Context, timeout time.Duration) error {
+	if c.runCtx == nil {
+		panic("call Container.StartAll() before WaitAllRunning()")
+	}
+	c.claimStop(nil)
+	if cause := c.getStopCause(); cause != nil {
+		return cause
+	}
+
+	waitCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var (
+		mu       sync.Mutex
+		notReady []string
+		wg       sync.WaitGroup
+	)
+	for _, rc := range c.runningServices() {
+		waiter, ok := rc.service.service.(ReadyWaiter)
+		if !ok {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if !waitReadyUntil(waitCtx, waiter, rc) {
+				mu.Lock()
+				notReady = append(notReady, rc.service.name)
+				mu.Unlock()
+			}
+		}()
+	}
+	allDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(allDone)
+	}()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	timedOut := false
+	select {
+	case <-allDone:
+	case <-c.runCtx.Done():
+	case <-ctx.Done():
+	case <-timer.C:
+		timedOut = true
+	}
+	cancel()
+	<-allDone
+
+	mu.Lock()
+	names := append([]string(nil), notReady...)
+	mu.Unlock()
+	sort.Strings(names)
+
+	// A failing service records the stop cause before it ends, so the cause is visible here
+	// even if the wait ended before the container started to stop.
+	// Also checked if all services are ready: a container that is stopping is not running.
+	c.claimStop(nil)
+	if cause := c.getStopCause(); cause != nil {
+		return cause
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	if !timedOut && ctx.Err() != nil {
+		return fmt.Errorf("waiting for services to run, not ready: %v: %w", names, context.Cause(ctx))
+	}
+	return fmt.Errorf("%w after %s, not ready: %v", ErrWaitRunningTimeout, timeout, names)
+}
+
+// waitReadyUntil returns true if the service is ready, false if ctx is done first or the service failed.
+// A service that ended without error is not waited for.
+func waitReadyUntil(ctx context.Context, waiter ReadyWaiter, rc *runContext) bool {
+	for {
+		if waiter.WaitReady(readyPollInterval) {
+			return true
+		}
+		if ctx.Err() != nil {
+			return false
+		}
+		if !rc.isRunning() {
+			return rc.getErr() == nil
+		}
+	}
+}
+
+// WaitAllRunningTimeout blocks until all services are ready or the timeout is reached.
+// It does not return when the container stops, and its goroutines run until the timeout.
+// Use WaitAllRunning instead.
+//
+// Deprecated: Use WaitAllRunning, it also returns when the container stops or the context is done.
 func (c *Container) WaitAllRunningTimeout(timeout time.Duration) bool {
 	wg := sync.WaitGroup{}
 	allReady := atomic.Bool{}
